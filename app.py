@@ -158,6 +158,7 @@ df_view["weight_ma7"] = df_view["weight"].rolling(7, min_periods=1).mean()
 df_view["bodyfat_ma7"] = df_view["bodyfat"].rolling(7, min_periods=1).mean()
 df_view["bmi_ma7"] = df_view["bmi"].rolling(7, min_periods=1).mean()
 df_view["target_weight"] = target_weight
+df_view["date_str"] = df_view["date"].dt.strftime("%Y-%m-%d")
 
 # -----------------------------
 # 最新サマリー
@@ -204,9 +205,9 @@ with c3:
 # グラフ作成用関数
 # -----------------------------
 def make_date_line_chart(dataframe, columns, y_title):
-    chart_data = dataframe[["date"] + columns].copy()
+    chart_data = dataframe[["date", "date_str"] + columns].copy()
     chart_data = chart_data.melt(
-        id_vars="date",
+        id_vars=["date", "date_str"],
         value_vars=columns,
         var_name="項目",
         value_name="値"
@@ -227,11 +228,15 @@ def make_date_line_chart(dataframe, columns, y_title):
         alt.Chart(chart_data)
         .mark_line(point=True)
         .encode(
-            x=alt.X("date:T", title="日付"),
+            x=alt.X(
+                "yearmonthdate(date):T",
+                title="日付",
+                axis=alt.Axis(format="%m/%d", labelAngle=0)
+            ),
             y=alt.Y("値:Q", title=y_title),
             color=alt.Color("項目:N", title="表示"),
             tooltip=[
-                alt.Tooltip("date:T", title="日付"),
+                alt.Tooltip("date_str:N", title="日付"),
                 alt.Tooltip("項目:N", title="項目"),
                 alt.Tooltip("値:Q", title=y_title, format=".1f"),
             ],
