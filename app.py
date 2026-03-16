@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import gspread
+import altair as alt
 from datetime import date
 from google.oauth2.service_account import Credentials
 
@@ -10,8 +11,8 @@ st.title("📊 体重・体脂肪ログ")
 # -----------------------------
 # 設定
 # -----------------------------
-DEFAULT_HEIGHT_CM = 170.0   # 初期値。必要なら変えてOK
-DEFAULT_TARGET_WEIGHT = 65.0  # 初期値。必要なら変えてOK
+DEFAULT_HEIGHT_CM = 170.0
+DEFAULT_TARGET_WEIGHT = 65.0
 
 # -----------------------------
 # Google Sheets 接続
@@ -41,7 +42,6 @@ def load_data():
 
     df = pd.DataFrame(records)
 
-    # 列が存在しない時の保険
     for col in ["date", "weight", "bodyfat"]:
         if col not in df.columns:
             df[col] = None
@@ -77,7 +77,11 @@ with st.sidebar:
         step=0.1,
         format="%.1f"
     )
-    display_days = st.selectbox("表示期間", ["全期間", "直近30日", "直近90日"], index=1)
+    display_days = st.selectbox(
+        "表示期間",
+        ["全期間", "直近30日", "直近90日"],
+        index=1
+    )
 
 # -----------------------------
 # 入力欄
@@ -114,7 +118,7 @@ if st.button("保存", type="primary"):
         # 同じ日付がすでにある場合は上書き
         if not df.empty and (df["date"].dt.strftime("%Y-%m-%d") == new_date).any():
             row_index = df.index[df["date"].dt.strftime("%Y-%m-%d") == new_date][0]
-            sheet_row = row_index + 2  # ヘッダーが1行あるので +2
+            sheet_row = row_index + 2  # ヘッダー行があるため +2
             ws.update(f"A{sheet_row}:C{sheet_row}", [[new_date, float(weight), float(bodyfat)]])
             st.success(f"{new_date} の記録を更新しました。")
         else:
@@ -147,20 +151,13 @@ if df_view.empty:
     st.info("この期間のデータがありません。")
     st.stop()
 
-# BMI計算
 height_m = height_cm / 100
-df_view["bmi"] = df_view["weight"] / (height_m ** 2)
 
-# 7日移動平均
+df_view["bmi"] = df_view["weight"] / (height_m ** 2)
 df_view["weight_ma7"] = df_view["weight"].rolling(7, min_periods=1).mean()
 df_view["bodyfat_ma7"] = df_view["bodyfat"].rolling(7, min_periods=1).mean()
 df_view["bmi_ma7"] = df_view["bmi"].rolling(7, min_periods=1).mean()
-
-# 目標体重ライン
 df_view["target_weight"] = target_weight
-
-# インデックス化
-df_view = df_view.set_index("date")
 
 # -----------------------------
 # 最新サマリー
@@ -204,18 +201,74 @@ with c3:
     )
 
 # -----------------------------
+# グラフ作成用関数
+# -----------------------------
+def make_date_line_chart(dataframe, columns, y_title):
+    chart_data = dataframe[["date"] + columns].copy()
+    chart_data = chart_data.melt(
+        id_vars="date",
+        value_vars=columns,
+        var_name="項目",
+        value_name="値"
+    )
+
+    label_map = {
+        "weight": "体重",
+        "weight_ma7": "体重(7日平均)",
+        "target_weight": "目標体重",
+        "bodyfat": "体脂肪率",
+        "bodyfat_ma7": "体脂肪率(7日平均)",
+        "bmi": "BMI",
+        "bmi_ma7": "BMI(7日平均)",
+    }
+    chart_data["項目"] = chart_data["項目"].map(label_map).fillna(chart_data["項目"])
+
+    chart = (
+        alt.Chart(chart_data)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("date:T", title="日付"),
+            y=alt.Y("値:Q", title=y_title),
+            color=alt.Color("項目:N", title="表示"),
+            tooltip=[
+                alt.Tooltip("date:T", title="日付"),
+                alt.Tooltip("項目:N", title="項目"),
+                alt.Tooltip("値:Q", title=y_title, format=".1f"),
+            ],
+        )
+        .properties(height=320)
+        .interactive()
+    )
+    return chart
+
+# -----------------------------
 # グラフ
 # -----------------------------
 st.subheader("グラフ")
 
 st.write("### 体重")
-st.line_chart(df_view[["weight", "weight_ma7", "target_weight"]])
+weight_chart = make_date_line_chart(
+    df_view,
+    ["weight", "weight_ma7", "target_weight"],
+    "体重 (kg)"
+)
+st.altair_chart(weight_chart, use_container_width=True)
 
 st.write("### 体脂肪率")
-st.line_chart(df_view[["bodyfat", "bodyfat_ma7"]])
+bodyfat_chart = make_date_line_chart(
+    df_view,
+    ["bodyfat", "bodyfat_ma7"],
+    "体脂肪率 (%)"
+)
+st.altair_chart(bodyfat_chart, use_container_width=True)
 
 st.write("### BMI")
-st.line_chart(df_view[["bmi", "bmi_ma7"]])
+bmi_chart = make_date_line_chart(
+    df_view,
+    ["bmi", "bmi_ma7"],
+    "BMI"
+)
+st.altair_chart(bmi_chart, use_container_width=True)
 
 # -----------------------------
 # 月平均
@@ -224,13 +277,38 @@ st.subheader("月平均")
 monthly = df.copy()
 monthly["month"] = monthly["date"].dt.to_period("M").astype(str)
 monthly_avg = monthly.groupby("month", as_index=False)[["weight", "bodyfat"]].mean()
-monthly_avg = monthly_avg.set_index("month")
 
 st.write("### 月平均 体重")
-st.line_chart(monthly_avg[["weight"]])
+monthly_weight_chart = (
+    alt.Chart(monthly_avg)
+    .mark_line(point=True)
+    .encode(
+        x=alt.X("month:N", title="月"),
+        y=alt.Y("weight:Q", title="体重 (kg)"),
+        tooltip=[
+            alt.Tooltip("month:N", title="月"),
+            alt.Tooltip("weight:Q", title="体重", format=".1f")
+        ],
+    )
+    .properties(height=280)
+)
+st.altair_chart(monthly_weight_chart, use_container_width=True)
 
 st.write("### 月平均 体脂肪率")
-st.line_chart(monthly_avg[["bodyfat"]])
+monthly_bodyfat_chart = (
+    alt.Chart(monthly_avg)
+    .mark_line(point=True)
+    .encode(
+        x=alt.X("month:N", title="月"),
+        y=alt.Y("bodyfat:Q", title="体脂肪率 (%)"),
+        tooltip=[
+            alt.Tooltip("month:N", title="月"),
+            alt.Tooltip("bodyfat:Q", title="体脂肪率", format=".1f")
+        ],
+    )
+    .properties(height=280)
+)
+st.altair_chart(monthly_bodyfat_chart, use_container_width=True)
 
 # -----------------------------
 # 記録一覧
