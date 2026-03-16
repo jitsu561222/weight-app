@@ -20,22 +20,18 @@ st.markdown("""
     padding-bottom: 1rem;
     max-width: 900px;
 }
-
 div[data-testid="stMetric"] {
     background-color: #0f172a;
     padding: 14px 18px;
     border-radius: 14px;
     color: white;
 }
-
 div[data-testid="stMetricLabel"] {
     color: #cbd5e1 !important;
 }
-
 div[data-testid="stMetricValue"] {
     color: white !important;
 }
-
 .small-note {
     color: #64748b;
     font-size: 0.9rem;
@@ -56,6 +52,9 @@ LOG_WORKSHEET_NAME = "Sheet1"
 SETTINGS_WORKSHEET_NAME = "Settings"
 DEFAULT_GOAL_WEIGHT = 68.0
 
+EXPECTED_LOG_HEADERS = ["Date", "Weight", "BodyFat", "RunDistance", "Memo", "UpdatedAt"]
+EXPECTED_SETTINGS_HEADERS = ["Key", "Value", "UpdatedAt"]
+
 
 @st.cache_resource
 def get_spreadsheet():
@@ -75,25 +74,58 @@ def get_or_create_worksheet(spreadsheet, worksheet_name, rows=1000, cols=20):
         return spreadsheet.add_worksheet(title=worksheet_name, rows=rows, cols=cols)
 
 
-def init_log_sheet(ws):
-    headers = ["Date", "Weight", "BodyFat", "RunDistance", "Memo", "UpdatedAt"]
+def ensure_log_sheet_headers(ws):
     values = ws.get_all_values()
+
     if not values:
-        ws.append_row(headers)
+        ws.append_row(EXPECTED_LOG_HEADERS)
+        return
+
+    first_row = values[0]
+    normalized = first_row[:len(EXPECTED_LOG_HEADERS)] + [""] * max(0, len(EXPECTED_LOG_HEADERS) - len(first_row))
+
+    needs_fix = False
+    for i, expected in enumerate(EXPECTED_LOG_HEADERS):
+        cell_val = normalized[i].strip() if normalized[i] else ""
+        if cell_val != expected:
+            needs_fix = True
+            break
+
+    if needs_fix:
+        ws.update("A1:F1", [EXPECTED_LOG_HEADERS])
 
 
-def init_settings_sheet(ws):
-    headers = ["Key", "Value", "UpdatedAt"]
+def ensure_settings_sheet_headers(ws):
     values = ws.get_all_values()
+
     if not values:
-        ws.append_row(headers)
+        ws.append_row(EXPECTED_SETTINGS_HEADERS)
+        return
+
+    first_row = values[0]
+    normalized = first_row[:len(EXPECTED_SETTINGS_HEADERS)] + [""] * max(0, len(EXPECTED_SETTINGS_HEADERS) - len(first_row))
+
+    needs_fix = False
+    for i, expected in enumerate(EXPECTED_SETTINGS_HEADERS):
+        cell_val = normalized[i].strip() if normalized[i] else ""
+        if cell_val != expected:
+            needs_fix = True
+            break
+
+    if needs_fix:
+        ws.update("A1:C1", [EXPECTED_SETTINGS_HEADERS])
 
 
 # =========================
 # 設定読み書き
 # =========================
 def get_setting(ws, key, default_value=None):
-    values = ws.get_all_values()
+    try:
+        values = ws.get_all_values()
+    except Exception as e:
+        st.error(f"Settingsシートの読み込みに失敗しました: {e}")
+        return default_value
+
     if len(values) <= 1:
         return default_value
 
@@ -105,20 +137,23 @@ def get_setting(ws, key, default_value=None):
 
 
 def set_setting(ws, key, value):
-    values = ws.get_all_values()
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    new_row = [key, str(value), now_str]
+    try:
+        values = ws.get_all_values()
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        new_row = [key, str(value), now_str]
 
-    if len(values) <= 1:
-        ws.append_row(new_row)
-        return
-
-    for i, row in enumerate(values[1:], start=2):
-        if len(row) >= 1 and row[0] == key:
-            ws.update(f"A{i}:C{i}", [new_row])
+        if len(values) <= 1:
+            ws.append_row(new_row)
             return
 
-    ws.append_row(new_row)
+        for i, row in enumerate(values[1:], start=2):
+            if len(row) >= 1 and row[0] == key:
+                ws.update(f"A{i}:C{i}", [new_row])
+                return
+
+        ws.append_row(new_row)
+    except Exception as e:
+        st.error(f"目標体重の保存に失敗しました: {e}")
 
 
 def get_goal_weight(settings_ws):
@@ -133,47 +168,27 @@ def get_goal_weight(settings_ws):
 # データ読み込み
 # =========================
 def load_data(ws):
-    expected_headers = ["Date", "Weight", "BodyFat", "RunDistance", "Memo", "UpdatedAt"]
-    values = ws.get_all_values()
+    try:
+        values = ws.get_all_values()
+    except Exception as e:
+        st.error(f"記録シートの読み込みに失敗しました: {e}")
+        return pd.DataFrame(columns=EXPECTED_LOG_HEADERS)
 
     if not values:
-        return pd.DataFrame(columns=expected_headers)
+        return pd.DataFrame(columns=EXPECTED_LOG_HEADERS)
 
-    raw_headers = values[0]
-
-    # ヘッダーを expected に合わせて補正
-    headers = []
-    used = set()
-    for i, expected in enumerate(expected_headers):
-        if i < len(raw_headers):
-            h = str(raw_headers[i]).strip()
-        else:
-            h = ""
-
-        if not h or h in used:
-            h = expected
-
-        headers.append(h)
-        used.add(h)
-
+    # ヘッダー行を除いたデータ部分だけ読む
     rows = values[1:] if len(values) > 1 else []
 
     fixed_rows = []
     for row in rows:
-        row = row[:len(expected_headers)] + [""] * max(0, len(expected_headers) - len(row))
+        row = row[:len(EXPECTED_LOG_HEADERS)] + [""] * max(0, len(EXPECTED_LOG_HEADERS) - len(row))
         fixed_rows.append(row)
 
     if not fixed_rows:
-        return pd.DataFrame(columns=expected_headers)
+        return pd.DataFrame(columns=EXPECTED_LOG_HEADERS)
 
-    df = pd.DataFrame(fixed_rows, columns=headers)
-
-    # 必要列が欠けていたら補う
-    for col in expected_headers:
-        if col not in df.columns:
-            df[col] = None
-
-    df = df[expected_headers]
+    df = pd.DataFrame(fixed_rows, columns=EXPECTED_LOG_HEADERS)
 
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df["Weight"] = pd.to_numeric(df["Weight"], errors="coerce")
@@ -191,7 +206,10 @@ def load_data(ws):
 # 1日1件: 同日データは上書き
 # =========================
 def upsert_data(ws, log_date, weight, bodyfat, run_distance, memo):
-    all_values = ws.get_all_values()
+    try:
+        all_values = ws.get_all_values()
+    except Exception as e:
+        return False, f"保存前のシート読み込みに失敗しました: {e}"
 
     date_str = pd.to_datetime(log_date).strftime("%Y-%m-%d")
     new_row = [
@@ -203,17 +221,36 @@ def upsert_data(ws, log_date, weight, bodyfat, run_distance, memo):
         datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ]
 
-    if len(all_values) <= 1:
+    try:
+        if len(all_values) <= 1:
+            ws.append_row(new_row)
+            return verify_saved_row(ws, date_str)
+
+        for i, row in enumerate(all_values[1:], start=2):
+            if len(row) > 0 and row[0] == date_str:
+                ws.update(f"A{i}:F{i}", [new_row])
+                return verify_saved_row(ws, date_str, updated=True)
+
         ws.append_row(new_row)
-        return "added"
+        return verify_saved_row(ws, date_str)
 
-    for i, row in enumerate(all_values[1:], start=2):
+    except Exception as e:
+        return False, f"保存処理に失敗しました: {e}"
+
+
+def verify_saved_row(ws, date_str, updated=False):
+    try:
+        values = ws.get_all_values()
+    except Exception as e:
+        return False, f"保存後の確認に失敗しました: {e}"
+
+    for row in values[1:]:
         if len(row) > 0 and row[0] == date_str:
-            ws.update(f"A{i}:F{i}", [new_row])
-            return "updated"
+            if updated:
+                return True, "updated"
+            return True, "added"
 
-    ws.append_row(new_row)
-    return "added"
+    return False, "保存確認ができませんでした。シートに反映されていない可能性があります。"
 
 
 # =========================
@@ -317,9 +354,7 @@ def build_weight_chart(month_df, goal_weight):
         text="label:N"
     )
 
-    chart = (
-        goal_rule + weight_line + ma_line + goal_text
-    ).properties(
+    chart = (goal_rule + weight_line + ma_line + goal_text).properties(
         height=320
     ).configure_axis(
         grid=True,
@@ -468,8 +503,8 @@ spreadsheet = get_spreadsheet()
 log_ws = get_or_create_worksheet(spreadsheet, LOG_WORKSHEET_NAME, rows=5000, cols=10)
 settings_ws = get_or_create_worksheet(spreadsheet, SETTINGS_WORKSHEET_NAME, rows=100, cols=5)
 
-init_log_sheet(log_ws)
-init_settings_sheet(settings_ws)
+ensure_log_sheet_headers(log_ws)
+ensure_settings_sheet_headers(settings_ws)
 
 saved_goal_weight = get_goal_weight(settings_ws)
 
@@ -519,14 +554,20 @@ with st.form("log_form"):
     submitted = st.form_submit_button("保存する")
 
     if submitted:
-        result = upsert_data(log_ws, log_date, weight, bodyfat, run_distance, memo)
-        set_setting(settings_ws, "goal_weight", goal_weight_input)
+        ok, message = upsert_data(log_ws, log_date, weight, bodyfat, run_distance, memo)
 
-        if result == "updated":
-            st.success("記録を上書きし、目標体重も保存しました。")
+        if ok:
+            set_setting(settings_ws, "goal_weight", goal_weight_input)
+
+            if message == "updated":
+                st.success("記録を上書きし、目標体重も保存しました。")
+            else:
+                st.success("記録と目標体重を保存しました。")
+
+            st.rerun()
         else:
-            st.success("記録と目標体重を保存しました。")
-        st.rerun()
+            st.error(message)
+            st.stop()
 
 # =========================
 # データ取得
