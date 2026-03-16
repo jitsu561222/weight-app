@@ -133,26 +133,57 @@ def get_goal_weight(settings_ws):
 # データ読み込み
 # =========================
 def load_data(ws):
-    records = ws.get_all_records()
-    if not records:
-        return pd.DataFrame(
-            columns=["Date", "Weight", "BodyFat", "RunDistance", "Memo", "UpdatedAt"]
-        )
+    expected_headers = ["Date", "Weight", "BodyFat", "RunDistance", "Memo", "UpdatedAt"]
+    values = ws.get_all_values()
 
-    df = pd.DataFrame(records)
+    if not values:
+        return pd.DataFrame(columns=expected_headers)
 
-    if "Date" in df.columns:
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    if "Weight" in df.columns:
-        df["Weight"] = pd.to_numeric(df["Weight"], errors="coerce")
-    if "BodyFat" in df.columns:
-        df["BodyFat"] = pd.to_numeric(df["BodyFat"], errors="coerce")
-    if "RunDistance" in df.columns:
-        df["RunDistance"] = pd.to_numeric(df["RunDistance"], errors="coerce")
-    if "UpdatedAt" in df.columns:
-        df["UpdatedAt"] = pd.to_datetime(df["UpdatedAt"], errors="coerce")
+    raw_headers = values[0]
 
+    # ヘッダーを expected に合わせて補正
+    headers = []
+    used = set()
+    for i, expected in enumerate(expected_headers):
+        if i < len(raw_headers):
+            h = str(raw_headers[i]).strip()
+        else:
+            h = ""
+
+        if not h or h in used:
+            h = expected
+
+        headers.append(h)
+        used.add(h)
+
+    rows = values[1:] if len(values) > 1 else []
+
+    fixed_rows = []
+    for row in rows:
+        row = row[:len(expected_headers)] + [""] * max(0, len(expected_headers) - len(row))
+        fixed_rows.append(row)
+
+    if not fixed_rows:
+        return pd.DataFrame(columns=expected_headers)
+
+    df = pd.DataFrame(fixed_rows, columns=headers)
+
+    # 必要列が欠けていたら補う
+    for col in expected_headers:
+        if col not in df.columns:
+            df[col] = None
+
+    df = df[expected_headers]
+
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df["Weight"] = pd.to_numeric(df["Weight"], errors="coerce")
+    df["BodyFat"] = pd.to_numeric(df["BodyFat"], errors="coerce")
+    df["RunDistance"] = pd.to_numeric(df["RunDistance"], errors="coerce")
+    df["UpdatedAt"] = pd.to_datetime(df["UpdatedAt"], errors="coerce")
+
+    df = df.dropna(subset=["Date"])
     df = df.sort_values("Date").reset_index(drop=True)
+
     return df
 
 
