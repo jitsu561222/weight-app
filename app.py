@@ -1,332 +1,650 @@
 import streamlit as st
 import pandas as pd
-import gspread
+from datetime import date, datetime
 import altair as alt
-from datetime import date
+import gspread
 from google.oauth2.service_account import Credentials
 
-st.set_page_config(page_title="体重・体脂肪ログ", page_icon="📊", layout="centered")
-st.title("📊 体重・体脂肪ログ")
+st.set_page_config(
+    page_title="体重・体脂肪・走行距離ログ",
+    page_icon="📊",
+    layout="centered"
+)
 
-# -----------------------------
-# 設定
-# -----------------------------
-DEFAULT_HEIGHT_CM = 170.0
-DEFAULT_TARGET_WEIGHT = 65.0
+st.title("体重")
 
-# -----------------------------
-# Google Sheets 接続
-# -----------------------------
+st.markdown("""
+<style>
+.block-container {
+    padding-top: 1.2rem;
+    padding-bottom: 1rem;
+    max-width: 900px;
+}
+
+div[data-testid="stMetric"] {
+    background-color: #0f172a;
+    padding: 14px 18px;
+    border-radius: 14px;
+    color: white;
+}
+
+div[data-testid="stMetricLabel"] {
+    color: #cbd5e1 !important;
+}
+
+div[data-testid="stMetricValue"] {
+    color: white !important;
+}
+
+.small-note {
+    color: #64748b;
+    font-size: 0.9rem;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# =========================
+# Google Sheets 接続設定
+# =========================
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/drive"
 ]
 
-creds = Credentials.from_service_account_info(
-    st.secrets["gcp_service_account"],
-    scopes=SCOPES
-)
-gc = gspread.authorize(creds)
+SPREADSHEET_NAME = "weight_log"
+LOG_WORKSHEET_NAME = "Sheet1"
+SETTINGS_WORKSHEET_NAME = "Settings"
+DEFAULT_GOAL_WEIGHT = 68.0
 
-SPREADSHEET_ID = st.secrets["spreadsheet"]["id"]
-ws = gc.open_by_key(SPREADSHEET_ID).worksheet("log")
 
-# -----------------------------
+@st.cache_resource
+def get_spreadsheet():
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=SCOPES
+    )
+    client = gspread.authorize(creds)
+    spreadsheet = client.open(SPREADSHEET_NAME)
+    return spreadsheet
+
+
+def get_or_create_worksheet(spreadsheet, worksheet_name, rows=1000, cols=20):
+    try:
+        return spreadsheet.worksheet(worksheet_name)
+    except gspread.WorksheetNotFound:
+        return spreadsheet.add_worksheet(title=worksheet_name, rows=rows, cols=cols)
+
+
+def init_log_sheet(ws):
+    headers = ["Date", "Weight", "BodyFat", "RunDistance", "Memo", "UpdatedAt"]
+    values = ws.get_all_values()
+    if not values:
+        ws.append_row(headers)
+
+
+def init_settings_sheet(ws):
+    headers = ["Key", "Value", "UpdatedAt"]
+    values = ws.get_all_values()
+    if not values:
+        ws.append_row(headers)
+
+
+# =========================
+# 設定読み書き
+# =========================
+def get_setting(ws, key, default_value=None):
+    values = ws.get_all_values()
+    if len(values) <= 1:
+        return default_value
+
+    for row in values[1:]:
+        if len(row) >= 2 and row[0] == key:
+            return row[1]
+
+    return default_value
+
+
+def set_setting(ws, key, value):
+    values = ws.get_all_values()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    new_row = [key, str(value), now_str]
+
+    if len(values) <= 1:
+        ws.append_row(new_row)
+        return
+
+    for i, row in enumerate(values[1:], start=2):
+        if len(row) >= 1 and row[0] == key:
+            ws.update(f"A{i}:C{i}", [new_row])
+            return
+
+    ws.append_row(new_row)
+
+
+def get_goal_weight(settings_ws):
+    value = get_setting(settings_ws, "goal_weight", DEFAULT_GOAL_WEIGHT)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return DEFAULT_GOAL_WEIGHT
+
+
+# =========================
 # データ読み込み
-# -----------------------------
-@st.cache_data(ttl=5)
-def load_data():
+# =========================
+def load_data(ws):
     records = ws.get_all_records()
     if not records:
-        return pd.DataFrame(columns=["date", "weight", "bodyfat"])
+        return pd.DataFrame(
+            columns=["Date", "Weight", "BodyFat", "RunDistance", "Memo", "UpdatedAt"]
+        )
 
     df = pd.DataFrame(records)
 
-    for col in ["date", "weight", "bodyfat"]:
-        if col not in df.columns:
-            df[col] = None
+    if "Date" in df.columns:
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    if "Weight" in df.columns:
+        df["Weight"] = pd.to_numeric(df["Weight"], errors="coerce")
+    if "BodyFat" in df.columns:
+        df["BodyFat"] = pd.to_numeric(df["BodyFat"], errors="coerce")
+    if "RunDistance" in df.columns:
+        df["RunDistance"] = pd.to_numeric(df["RunDistance"], errors="coerce")
+    if "UpdatedAt" in df.columns:
+        df["UpdatedAt"] = pd.to_datetime(df["UpdatedAt"], errors="coerce")
 
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df["weight"] = pd.to_numeric(df["weight"], errors="coerce")
-    df["bodyfat"] = pd.to_numeric(df["bodyfat"], errors="coerce")
-
-    df = df.dropna(subset=["date"])
-    df = df.sort_values("date").reset_index(drop=True)
+    df = df.sort_values("Date").reset_index(drop=True)
     return df
 
-df = load_data()
 
-# -----------------------------
-# サイド設定
-# -----------------------------
-with st.sidebar:
-    st.header("設定")
-    height_cm = st.number_input(
-        "身長 (cm)",
-        min_value=50.0,
-        max_value=250.0,
-        value=DEFAULT_HEIGHT_CM,
-        step=0.1,
-        format="%.1f"
-    )
-    target_weight = st.number_input(
-        "目標体重 (kg)",
-        min_value=0.0,
-        max_value=300.0,
-        value=DEFAULT_TARGET_WEIGHT,
-        step=0.1,
-        format="%.1f"
-    )
-    display_days = st.selectbox(
-        "表示期間",
-        ["全期間", "直近30日", "直近90日"],
-        index=1
-    )
+# =========================
+# 1日1件: 同日データは上書き
+# =========================
+def upsert_data(ws, log_date, weight, bodyfat, run_distance, memo):
+    all_values = ws.get_all_values()
 
-# -----------------------------
-# 入力欄
-# -----------------------------
-st.subheader("今日の記録")
+    date_str = pd.to_datetime(log_date).strftime("%Y-%m-%d")
+    new_row = [
+        date_str,
+        f"{weight:.1f}",
+        f"{bodyfat:.1f}",
+        f"{run_distance:.1f}",
+        memo,
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ]
 
-input_date = st.date_input("日付", value=date.today())
+    if len(all_values) <= 1:
+        ws.append_row(new_row)
+        return "added"
 
-col1, col2 = st.columns(2)
-with col1:
-    weight = st.number_input(
-        "体重 (kg)",
-        min_value=0.0,
-        max_value=300.0,
-        step=0.1,
-        format="%.1f"
-    )
+    for i, row in enumerate(all_values[1:], start=2):
+        if len(row) > 0 and row[0] == date_str:
+            ws.update(f"A{i}:F{i}", [new_row])
+            return "updated"
 
-with col2:
-    bodyfat = st.number_input(
-        "体脂肪率 (%)",
-        min_value=0.0,
-        max_value=100.0,
-        step=0.1,
-        format="%.1f"
-    )
+    ws.append_row(new_row)
+    return "added"
 
-if st.button("保存", type="primary"):
-    if weight == 0.0 and bodyfat == 0.0:
-        st.warning("体重か体脂肪率を入力してください。")
+
+# =========================
+# データ整形
+# =========================
+def prepare_dataframe(df):
+    if df.empty:
+        return df.copy()
+
+    temp = df.copy()
+    temp = temp.dropna(subset=["Date"])
+    temp = temp.sort_values(["Date", "UpdatedAt"])
+
+    temp["DateOnly"] = temp["Date"].dt.date
+    temp = temp.groupby("DateOnly", as_index=False).last()
+    temp["Date"] = pd.to_datetime(temp["Date"])
+    temp = temp.sort_values("Date").reset_index(drop=True)
+
+    temp["RunDistance"] = temp["RunDistance"].fillna(0)
+    temp["FatMass"] = temp["Weight"] * (temp["BodyFat"] / 100.0)
+    temp["LeanMass"] = temp["Weight"] - temp["FatMass"]
+    temp["WeightMA7"] = temp["Weight"].rolling(7).mean()
+    temp["BodyFatMA7"] = temp["BodyFat"].rolling(7).mean()
+    temp["WeightDiff"] = temp["Weight"].diff()
+
+    return temp
+
+
+def get_month_data(df, target_month):
+    if df.empty:
+        return df.copy()
+
+    month_start = pd.Timestamp(target_month.year, target_month.month, 1)
+    if target_month.month == 12:
+        month_end = pd.Timestamp(target_month.year + 1, 1, 1)
     else:
-        new_date = input_date.strftime("%Y-%m-%d")
+        month_end = pd.Timestamp(target_month.year, target_month.month + 1, 1)
 
-        # 同じ日付がすでにある場合は上書き
-        if not df.empty and (df["date"].dt.strftime("%Y-%m-%d") == new_date).any():
-            row_index = df.index[df["date"].dt.strftime("%Y-%m-%d") == new_date][0]
-            sheet_row = row_index + 2  # ヘッダー行があるため +2
-            ws.update(f"A{sheet_row}:C{sheet_row}", [[new_date, float(weight), float(bodyfat)]])
-            st.success(f"{new_date} の記録を更新しました。")
-        else:
-            ws.append_row([new_date, float(weight), float(bodyfat)])
-            st.success("保存しました。")
+    return df[(df["Date"] >= month_start) & (df["Date"] < month_end)].copy()
 
-        st.cache_data.clear()
-        st.rerun()
 
-# -----------------------------
-# データが無い場合
-# -----------------------------
-if df.empty:
-    st.info("まだデータがありません。最初の1件を保存してください。")
-    st.stop()
+# =========================
+# Altair グラフ
+# =========================
+def build_weight_chart(month_df, goal_weight):
+    chart_df = month_df.copy()
+    chart_df["Date"] = pd.to_datetime(chart_df["Date"])
 
-# -----------------------------
-# 表示用データ作成
-# -----------------------------
-df_view = df.copy()
-
-if display_days == "直近30日":
-    cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=30)
-    df_view = df_view[df_view["date"] >= cutoff]
-elif display_days == "直近90日":
-    cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=90)
-    df_view = df_view[df_view["date"] >= cutoff]
-
-if df_view.empty:
-    st.info("この期間のデータがありません。")
-    st.stop()
-
-height_m = height_cm / 100
-
-df_view["bmi"] = df_view["weight"] / (height_m ** 2)
-df_view["weight_ma7"] = df_view["weight"].rolling(7, min_periods=1).mean()
-df_view["bodyfat_ma7"] = df_view["bodyfat"].rolling(7, min_periods=1).mean()
-df_view["bmi_ma7"] = df_view["bmi"].rolling(7, min_periods=1).mean()
-df_view["target_weight"] = target_weight
-df_view["date_str"] = df_view["date"].dt.strftime("%Y-%m-%d")
-
-# -----------------------------
-# 最新サマリー
-# -----------------------------
-latest = df.iloc[-1]
-prev = df.iloc[-2] if len(df) >= 2 else None
-
-latest_weight = latest["weight"] if pd.notna(latest["weight"]) else None
-latest_bodyfat = latest["bodyfat"] if pd.notna(latest["bodyfat"]) else None
-latest_bmi = (latest_weight / (height_m ** 2)) if latest_weight is not None else None
-
-delta_weight = None
-delta_bodyfat = None
-if prev is not None:
-    if pd.notna(prev["weight"]) and latest_weight is not None:
-        delta_weight = latest_weight - prev["weight"]
-    if pd.notna(prev["bodyfat"]) and latest_bodyfat is not None:
-        delta_bodyfat = latest_bodyfat - prev["bodyfat"]
-
-st.subheader("最新サマリー")
-c1, c2, c3 = st.columns(3)
-
-with c1:
-    st.metric(
-        "最新体重",
-        f"{latest_weight:.1f} kg" if latest_weight is not None else "-",
-        f"{delta_weight:+.1f} kg" if delta_weight is not None else None
+    base = alt.Chart(chart_df).encode(
+        x=alt.X(
+            "Date:T",
+            axis=alt.Axis(
+                title="",
+                format="%m/%d",
+                labelAngle=0,
+                tickCount="week",
+                grid=False
+            )
+        )
     )
 
-with c2:
-    st.metric(
-        "最新体脂肪率",
-        f"{latest_bodyfat:.1f} %" if latest_bodyfat is not None else "-",
-        f"{delta_bodyfat:+.1f} %" if delta_bodyfat is not None else None
+    weight_line = base.mark_line(point=alt.OverlayMarkDef(size=55), strokeWidth=3).encode(
+        y=alt.Y(
+            "Weight:Q",
+            title="kg",
+            scale=alt.Scale(zero=False)
+        ),
+        tooltip=[
+            alt.Tooltip("Date:T", title="日付", format="%Y-%m-%d"),
+            alt.Tooltip("Weight:Q", title="体重", format=".1f")
+        ]
     )
 
-with c3:
-    st.metric(
-        "BMI",
-        f"{latest_bmi:.1f}" if latest_bmi is not None else "-"
+    ma_line = base.mark_line(strokeDash=[6, 4], opacity=0.65, strokeWidth=2).encode(
+        y=alt.Y("WeightMA7:Q"),
+        tooltip=[
+            alt.Tooltip("Date:T", title="日付", format="%Y-%m-%d"),
+            alt.Tooltip("WeightMA7:Q", title="7日移動平均", format=".2f")
+        ]
     )
 
-# -----------------------------
-# グラフ作成用関数
-# -----------------------------
-def make_date_line_chart(dataframe, columns, y_title):
-    chart_data = dataframe[["date", "date_str"] + columns].copy()
-    chart_data = chart_data.melt(
-        id_vars=["date", "date_str"],
-        value_vars=columns,
-        var_name="項目",
-        value_name="値"
+    goal_df = pd.DataFrame({"y": [goal_weight]})
+    goal_rule = alt.Chart(goal_df).mark_rule(strokeWidth=2).encode(
+        y="y:Q"
     )
 
-    label_map = {
-        "weight": "体重",
-        "weight_ma7": "体重(7日平均)",
-        "target_weight": "目標体重",
-        "bodyfat": "体脂肪率",
-        "bodyfat_ma7": "体脂肪率(7日平均)",
-        "bmi": "BMI",
-        "bmi_ma7": "BMI(7日平均)",
-    }
-    chart_data["項目"] = chart_data["項目"].map(label_map).fillna(chart_data["項目"])
+    goal_text_df = pd.DataFrame({
+        "Date": [chart_df["Date"].max()],
+        "y": [goal_weight],
+        "label": [f"目標 {goal_weight:.1f}kg"]
+    })
+
+    goal_text = alt.Chart(goal_text_df).mark_text(
+        align="right",
+        dx=-8,
+        dy=-8,
+        fontSize=12
+    ).encode(
+        x="Date:T",
+        y="y:Q",
+        text="label:N"
+    )
 
     chart = (
-        alt.Chart(chart_data)
-        .mark_line(point=True)
-        .encode(
-            x=alt.X(
-                "yearmonthdate(date):T",
-                title="日付",
-                axis=alt.Axis(format="%m/%d", labelAngle=0)
-            ),
-            y=alt.Y("値:Q", title=y_title),
-            color=alt.Color("項目:N", title="表示"),
-            tooltip=[
-                alt.Tooltip("date_str:N", title="日付"),
-                alt.Tooltip("項目:N", title="項目"),
-                alt.Tooltip("値:Q", title=y_title, format=".1f"),
-            ],
-        )
-        .properties(height=320)
-        .interactive()
+        goal_rule + weight_line + ma_line + goal_text
+    ).properties(
+        height=320
+    ).configure_axis(
+        grid=True,
+        gridOpacity=0.15,
+        domain=False,
+        tickColor="#cbd5e1",
+        labelColor="#334155",
+        titleColor="#334155"
+    ).configure_view(
+        strokeWidth=0
     )
+
     return chart
 
-# -----------------------------
+
+def build_run_distance_chart(month_df):
+    chart_df = month_df.copy()
+    chart_df["Date"] = pd.to_datetime(chart_df["Date"])
+
+    chart = alt.Chart(chart_df).mark_bar(
+        cornerRadiusTopLeft=4,
+        cornerRadiusTopRight=4
+    ).encode(
+        x=alt.X(
+            "Date:T",
+            axis=alt.Axis(
+                title="",
+                format="%m/%d",
+                labelAngle=0,
+                tickCount="week",
+                grid=False
+            )
+        ),
+        y=alt.Y("RunDistance:Q", title="km"),
+        tooltip=[
+            alt.Tooltip("Date:T", title="日付", format="%Y-%m-%d"),
+            alt.Tooltip("RunDistance:Q", title="走行距離", format=".1f")
+        ]
+    ).properties(
+        height=220
+    ).configure_axis(
+        grid=True,
+        gridOpacity=0.15,
+        domain=False
+    ).configure_view(
+        strokeWidth=0
+    )
+
+    return chart
+
+
+def build_bodyfat_chart(month_df):
+    chart_df = month_df.copy()
+    chart_df["Date"] = pd.to_datetime(chart_df["Date"])
+
+    line1 = alt.Chart(chart_df).mark_line(
+        point=alt.OverlayMarkDef(size=50),
+        strokeWidth=3
+    ).encode(
+        x=alt.X(
+            "Date:T",
+            axis=alt.Axis(title="", format="%m/%d", labelAngle=0, tickCount="week", grid=False)
+        ),
+        y=alt.Y("BodyFat:Q", title="%"),
+        tooltip=[
+            alt.Tooltip("Date:T", title="日付", format="%Y-%m-%d"),
+            alt.Tooltip("BodyFat:Q", title="体脂肪率", format=".1f")
+        ]
+    )
+
+    line2 = alt.Chart(chart_df).mark_line(
+        strokeDash=[6, 4],
+        opacity=0.65,
+        strokeWidth=2
+    ).encode(
+        x="Date:T",
+        y=alt.Y("BodyFatMA7:Q"),
+        tooltip=[
+            alt.Tooltip("Date:T", title="日付", format="%Y-%m-%d"),
+            alt.Tooltip("BodyFatMA7:Q", title="7日移動平均", format=".2f")
+        ]
+    )
+
+    chart = (line1 + line2).properties(
+        height=260
+    ).configure_axis(
+        grid=True,
+        gridOpacity=0.15,
+        domain=False
+    ).configure_view(
+        strokeWidth=0
+    )
+
+    return chart
+
+
+def build_body_composition_chart(month_df):
+    chart_df = month_df.copy()
+    chart_df["Date"] = pd.to_datetime(chart_df["Date"])
+
+    fat_line = alt.Chart(chart_df).mark_line(
+        point=alt.OverlayMarkDef(size=50),
+        strokeWidth=3
+    ).encode(
+        x=alt.X(
+            "Date:T",
+            axis=alt.Axis(title="", format="%m/%d", labelAngle=0, tickCount="week", grid=False)
+        ),
+        y=alt.Y("FatMass:Q", title="kg"),
+        tooltip=[
+            alt.Tooltip("Date:T", title="日付", format="%Y-%m-%d"),
+            alt.Tooltip("FatMass:Q", title="推定脂肪量", format=".2f")
+        ]
+    )
+
+    lean_line = alt.Chart(chart_df).mark_line(
+        point=alt.OverlayMarkDef(size=50),
+        strokeWidth=3,
+        opacity=0.75
+    ).encode(
+        x="Date:T",
+        y=alt.Y("LeanMass:Q"),
+        tooltip=[
+            alt.Tooltip("Date:T", title="日付", format="%Y-%m-%d"),
+            alt.Tooltip("LeanMass:Q", title="推定除脂肪量", format=".2f")
+        ]
+    )
+
+    chart = (fat_line + lean_line).properties(
+        height=260
+    ).configure_axis(
+        grid=True,
+        gridOpacity=0.15,
+        domain=False
+    ).configure_view(
+        strokeWidth=0
+    )
+
+    return chart
+
+
+# =========================
+# シート初期化
+# =========================
+spreadsheet = get_spreadsheet()
+log_ws = get_or_create_worksheet(spreadsheet, LOG_WORKSHEET_NAME, rows=5000, cols=10)
+settings_ws = get_or_create_worksheet(spreadsheet, SETTINGS_WORKSHEET_NAME, rows=100, cols=5)
+
+init_log_sheet(log_ws)
+init_settings_sheet(settings_ws)
+
+saved_goal_weight = get_goal_weight(settings_ws)
+
+# =========================
+# 入力フォーム
+# =========================
+st.subheader("✍️ 今日の記録")
+
+with st.form("log_form"):
+    col1, col2 = st.columns(2)
+
+    with col1:
+        log_date = st.date_input("日付", value=date.today())
+        weight = st.number_input(
+            "体重 (kg)",
+            min_value=0.0,
+            max_value=300.0,
+            step=0.1,
+            format="%.1f"
+        )
+        bodyfat = st.number_input(
+            "体脂肪率 (%)",
+            min_value=0.0,
+            max_value=100.0,
+            step=0.1,
+            format="%.1f"
+        )
+
+    with col2:
+        run_distance = st.number_input(
+            "走行距離 (km)",
+            min_value=0.0,
+            max_value=200.0,
+            step=0.1,
+            format="%.1f"
+        )
+        goal_weight_input = st.number_input(
+            "目標体重 (kg)",
+            min_value=30.0,
+            max_value=150.0,
+            value=float(saved_goal_weight),
+            step=0.1,
+            format="%.1f"
+        )
+        memo = st.text_input("メモ", value="")
+
+    submitted = st.form_submit_button("保存する")
+
+    if submitted:
+        result = upsert_data(log_ws, log_date, weight, bodyfat, run_distance, memo)
+        set_setting(settings_ws, "goal_weight", goal_weight_input)
+
+        if result == "updated":
+            st.success("記録を上書きし、目標体重も保存しました。")
+        else:
+            st.success("記録と目標体重を保存しました。")
+        st.rerun()
+
+# =========================
+# データ取得
+# =========================
+raw_df = load_data(log_ws)
+df = prepare_dataframe(raw_df)
+
+if df.empty:
+    st.info("まだデータがありません。まずは1件入力してください。")
+    st.stop()
+
+# =========================
+# 月選択と目標体重変更
+# =========================
+latest_date = df["Date"].max()
+default_month = latest_date.to_pydatetime().date().replace(day=1)
+
+st.subheader("📅 月表示")
+col_month, col_goal, col_button = st.columns([2, 1, 1])
+
+with col_month:
+    selected_month = st.date_input("表示する月", value=default_month)
+
+with col_goal:
+    current_goal_weight = st.number_input(
+        "現在の目標体重 (kg)",
+        min_value=30.0,
+        max_value=150.0,
+        value=float(get_goal_weight(settings_ws)),
+        step=0.1,
+        format="%.1f",
+        key="goal_weight_display"
+    )
+
+with col_button:
+    st.write("")
+    st.write("")
+    if st.button("目標を保存"):
+        set_setting(settings_ws, "goal_weight", current_goal_weight)
+        st.success("目標体重を保存しました。")
+        st.rerun()
+
+month_df = get_month_data(df, selected_month)
+
+if month_df.empty:
+    st.warning("この月のデータはありません。")
+    st.stop()
+
+# =========================
+# 月次集計
+# =========================
+month_label = f"{selected_month.year}年{selected_month.month}月"
+
+avg_weight = month_df["Weight"].mean()
+avg_bodyfat = month_df["BodyFat"].mean()
+sum_run = month_df["RunDistance"].sum()
+avg_fat_mass = month_df["FatMass"].mean()
+
+latest_row = month_df.sort_values("Date").iloc[-1]
+prev_row = month_df.sort_values("Date").iloc[-2] if len(month_df) >= 2 else None
+weight_delta = latest_row["Weight"] - prev_row["Weight"] if prev_row is not None else 0.0
+goal_diff = latest_row["Weight"] - current_goal_weight
+
+# =========================
+# 大きな月平均表示
+# =========================
+st.markdown(f"## {month_label}")
+st.markdown(
+    f"""
+    <div style="background:#0f172a;padding:18px 22px;border-radius:16px;margin-bottom:18px;">
+        <div style="color:#cbd5e1;font-size:1rem;">{selected_month.month}月1日 - {selected_month.month}月末 の平均体重</div>
+        <div style="color:white;font-size:3rem;font-weight:700;line-height:1.1;margin-top:8px;">{avg_weight:.2f} <span style="font-size:1.4rem;">kg</span></div>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
+# =========================
+# サマリー
+# =========================
+st.subheader("📊 月のまとめ")
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("月平均体重", f"{avg_weight:.2f} kg")
+c2.metric("月平均体脂肪率", f"{avg_bodyfat:.2f} %")
+c3.metric("月間走行距離", f"{sum_run:.1f} km")
+c4.metric("平均推定脂肪量", f"{avg_fat_mass:.2f} kg")
+
+st.subheader("📌 最新データ")
+c5, c6, c7, c8, c9 = st.columns(5)
+c5.metric("最新体重", f"{latest_row['Weight']:.1f} kg", f"{weight_delta:+.1f} kg")
+c6.metric("最新体脂肪率", f"{latest_row['BodyFat']:.1f} %")
+c7.metric("最新走行距離", f"{latest_row['RunDistance']:.1f} km")
+c8.metric("推定脂肪量", f"{latest_row['FatMass']:.2f} kg")
+c9.metric("目標まで", f"{goal_diff:+.1f} kg")
+
+# =========================
 # グラフ
-# -----------------------------
-st.subheader("グラフ")
-
-st.write("### 体重")
-weight_chart = make_date_line_chart(
-    df_view,
-    ["weight", "weight_ma7", "target_weight"],
-    "体重 (kg)"
+# =========================
+st.subheader("📉 体重")
+st.altair_chart(
+    build_weight_chart(month_df, goal_weight=current_goal_weight),
+    use_container_width=True
 )
-st.altair_chart(weight_chart, use_container_width=True)
 
-st.write("### 体脂肪率")
-bodyfat_chart = make_date_line_chart(
-    df_view,
-    ["bodyfat", "bodyfat_ma7"],
-    "体脂肪率 (%)"
+st.subheader("🏃 走行距離")
+st.altair_chart(
+    build_run_distance_chart(month_df),
+    use_container_width=True
 )
-st.altair_chart(bodyfat_chart, use_container_width=True)
 
-st.write("### BMI")
-bmi_chart = make_date_line_chart(
-    df_view,
-    ["bmi", "bmi_ma7"],
-    "BMI"
+st.subheader("🔥 体脂肪率")
+st.altair_chart(
+    build_bodyfat_chart(month_df),
+    use_container_width=True
 )
-st.altair_chart(bmi_chart, use_container_width=True)
 
-# -----------------------------
-# 月平均
-# -----------------------------
-st.subheader("月平均")
-monthly = df.copy()
-monthly["month"] = monthly["date"].dt.to_period("M").astype(str)
-monthly_avg = monthly.groupby("month", as_index=False)[["weight", "bodyfat"]].mean()
-
-st.write("### 月平均 体重")
-monthly_weight_chart = (
-    alt.Chart(monthly_avg)
-    .mark_line(point=True)
-    .encode(
-        x=alt.X("month:N", title="月"),
-        y=alt.Y("weight:Q", title="体重 (kg)"),
-        tooltip=[
-            alt.Tooltip("month:N", title="月"),
-            alt.Tooltip("weight:Q", title="体重", format=".1f")
-        ],
-    )
-    .properties(height=280)
+st.subheader("🧪 推定体組成")
+st.altair_chart(
+    build_body_composition_chart(month_df),
+    use_container_width=True
 )
-st.altair_chart(monthly_weight_chart, use_container_width=True)
 
-st.write("### 月平均 体脂肪率")
-monthly_bodyfat_chart = (
-    alt.Chart(monthly_avg)
-    .mark_line(point=True)
-    .encode(
-        x=alt.X("month:N", title="月"),
-        y=alt.Y("bodyfat:Q", title="体脂肪率 (%)"),
-        tooltip=[
-            alt.Tooltip("month:N", title="月"),
-            alt.Tooltip("bodyfat:Q", title="体脂肪率", format=".1f")
-        ],
-    )
-    .properties(height=280)
+# =========================
+# データ表
+# =========================
+st.subheader("📋 記録一覧")
+
+display_df = month_df.copy()
+display_df["Date"] = display_df["Date"].dt.strftime("%Y-%m-%d")
+
+st.dataframe(
+    display_df[[
+        "Date",
+        "Weight",
+        "BodyFat",
+        "FatMass",
+        "LeanMass",
+        "RunDistance",
+        "WeightDiff",
+        "Memo"
+    ]].rename(columns={
+        "Date": "日付",
+        "Weight": "体重(kg)",
+        "BodyFat": "体脂肪率(%)",
+        "FatMass": "推定脂肪量(kg)",
+        "LeanMass": "推定除脂肪量(kg)",
+        "RunDistance": "走行距離(km)",
+        "WeightDiff": "前日比(kg)",
+        "Memo": "メモ"
+    }),
+    use_container_width=True
 )
-st.altair_chart(monthly_bodyfat_chart, use_container_width=True)
-
-# -----------------------------
-# 記録一覧
-# -----------------------------
-with st.expander("記録一覧を表示"):
-    show_df = df.copy()
-    show_df["BMI"] = show_df["weight"] / (height_m ** 2)
-    show_df["date"] = show_df["date"].dt.strftime("%Y-%m-%d")
-    show_df = show_df.rename(
-        columns={
-            "date": "日付",
-            "weight": "体重(kg)",
-            "bodyfat": "体脂肪率(%)"
-        }
-    )
-    st.dataframe(show_df, use_container_width=True)
